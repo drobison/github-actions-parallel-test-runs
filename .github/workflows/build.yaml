@@ -1,0 +1,75 @@
+name: Distributed Test Pipelne
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      max_testing_duration:
+        description: "Desired maximum test duration"
+        required: true
+        default: 20
+        type: number
+
+jobs:
+  get_tests_and_binpack:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./scripts
+    outputs:
+      shards: ${{ steps.number.outputs.shards }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: npm install
+        run: npm i
+
+      - name: Get tests and binpack
+        id: number
+        run: |
+          result=$(npx ts-node get_tests.ts ${{ inputs.max_testing_duration }})
+          count=$(echo $result | jq length)
+          echo "shards=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Upload tests distribution JSON artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-distribution-artifact
+          path: ./scripts/tests_distribution.json
+
+      - name: Generate matrix for parallel test runs
+        id: matrix
+        run: echo "matrix=[$(seq 1 ${{ steps.number.outputs.shards }} | sed 's/.*/"&"/' | paste -sd ',' -)]" >> "$GITHUB_OUTPUT"
+
+  parallel_test_runner:
+    needs: get_tests_and_binpack
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./scripts
+    strategy:
+      matrix:
+        run: ${{fromJson(needs.get_tests_and_binpack.outputs.matrix)}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: npm install
+        run: npm i
+
+      - name: Download JSON artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tests-distribution-artifact
+
+      - name: Run shards tests
+        run: npx ts-node run_shards_tests.ts ${{ matrix.run }} ../tests_distribution.json
